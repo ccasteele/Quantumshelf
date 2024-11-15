@@ -23,9 +23,9 @@ import tachiyomi.domain.track.manga.model.MangaTrack as DomainTrack
 class Kavita(id: Long) : BaseTracker(id, "Kavita"), EnhancedMangaTracker, MangaTracker {
 
     companion object {
-        const val UNREAD = 1L
-        const val READING = 2L
-        const val COMPLETED = 3L
+        const val STATUS_UNREAD = 1L
+        const val STATUS_READING = 2L
+        const val STATUS_COMPLETED = 3L
     }
 
     var authentications: OAuth? = null
@@ -39,36 +39,40 @@ class Kavita(id: Long) : BaseTracker(id, "Kavita"), EnhancedMangaTracker, MangaT
 
     override fun getLogoColor() = Color.rgb(74, 198, 148)
 
-    override fun getStatusListManga(): List<Long> = listOf(UNREAD, READING, COMPLETED)
+    override fun getStatusListManga(): List<Long> = listOf(STATUS_UNREAD, STATUS_READING, STATUS_COMPLETED)
 
     override fun getStatusForManga(status: Long): StringResource? = when (status) {
-        UNREAD -> MR.strings.unread
-        READING -> MR.strings.reading
-        COMPLETED -> MR.strings.completed
-        else -> null
+        STATUS_UNREAD -> MR.strings.unread
+        STATUS_READING -> MR.strings.reading
+        STATUS_COMPLETED -> MR.strings.completed
+        else -> MR.strings.unknown_status // Optional: define an unknown status string in your resources
     }
 
-    override fun getReadingStatus(): Long = READING
+    override fun getReadingStatus(): Long = STATUS_READING
 
     override fun getRereadingStatus(): Long = -1
 
-    override fun getCompletionStatus(): Long = COMPLETED
+    override fun getCompletionStatus(): Long = STATUS_COMPLETED
 
     override fun getScoreList(): ImmutableList<String> = persistentListOf()
 
     override fun displayScore(track: DomainTrack): String = ""
 
     override suspend fun update(track: MangaTrack, didReadChapter: Boolean): MangaTrack {
-        if (track.status != COMPLETED) {
+        if (track.status != STATUS_COMPLETED) {
             if (didReadChapter) {
-                if (track.last_chapter_read.toLong() == track.total_chapters && track.total_chapters > 0) {
-                    track.status = COMPLETED
-                } else {
-                    track.status = READING
-                }
+                track.status = determineStatus(track)
             }
         }
         return api.updateProgress(track)
+    }
+
+    private fun determineStatus(track: MangaTrack): Long {
+        return if (track.last_chapter_read.toLong() == track.total_chapters && track.total_chapters > 0) {
+            STATUS_COMPLETED
+        } else {
+            STATUS_READING
+        }
     }
 
     override suspend fun bind(track: MangaTrack, hasReadChapters: Boolean): MangaTrack {
@@ -98,12 +102,15 @@ class Kavita(id: Long) : BaseTracker(id, "Kavita"), EnhancedMangaTracker, MangaT
 
     override fun getAcceptedSources() = listOf("eu.kanade.tachiyomi.extension.all.kavita.Kavita")
 
-    override suspend fun match(manga: Manga): MangaTrackSearch? =
-        try {
+    override suspend fun match(manga: Manga): MangaTrackSearch? {
+        return try {
             api.getTrackSearch(manga.url)
         } catch (e: Exception) {
+            // Log the error for debugging purposes
+            Log.e("Kavita", "Error matching manga: ${manga.url}", e)
             null
         }
+    }
 
     override fun isTrackFrom(track: DomainTrack, manga: Manga, source: MangaSource?): Boolean =
         track.remoteUrl == manga.url && source?.let { accept(it) } == true
@@ -115,34 +122,44 @@ class Kavita(id: Long) : BaseTracker(id, "Kavita"), EnhancedMangaTracker, MangaT
             null
         }
 
+    // Refactored loadOAuth() to reduce duplication
     fun loadOAuth() {
         val oauth = OAuth()
         for (id in 1..3) {
             val authentication = oauth.authentications[id - 1]
-            val sourceId by lazy {
-                val key = "kavita_$id/all/1" // Hardcoded versionID to 1
-                val bytes = MessageDigest.getInstance("MD5").digest(key.toByteArray())
-                (0..7).map { bytes[it].toLong() and 0xff shl 8 * (7 - it) }
-                    .reduce(Long::or) and Long.MAX_VALUE
-            }
-            val preferences = (sourceManager.get(sourceId) as ConfigurableSource).sourcePreferences()
+            val sourceId = generateSourceId(id)
+            val preferences = getSourcePreferences(sourceId)
 
-            val prefApiUrl = preferences.getString("APIURL", "")
-            val prefApiKey = preferences.getString("APIKEY", "")
-            if (prefApiUrl.isNullOrEmpty() || prefApiKey.isNullOrEmpty()) {
-                // Source not configured. Skip
-                continue
-            }
+            val (apiUrl, apiKey) = getApiCredentials(preferences)
+            if (apiUrl.isNullOrEmpty() || apiKey.isNullOrEmpty()) continue
 
-            val token = api.getNewToken(apiUrl = prefApiUrl, apiKey = prefApiKey)
-            if (token.isNullOrEmpty()) {
-                // Source is not accessible. Skip
-                continue
-            }
+            val token = fetchToken(apiUrl, apiKey)
+            if (token.isNullOrEmpty()) continue
 
-            authentication.apiUrl = prefApiUrl
-            authentication.jwtToken = token.toString()
+            authentication.apiUrl = apiUrl
+            authentication.jwtToken = token
         }
         authentications = oauth
+    }
+
+    private fun generateSourceId(id: Int): Long {
+        val key = "kavita_$id/all/1" // Hardcoded versionID to 1
+        val bytes = MessageDigest.getInstance("MD5").digest(key.toByteArray())
+        return (0..7).map { bytes[it].toLong() and 0xff shl 8 * (7 - it) }
+            .reduce(Long::or) and Long.MAX_VALUE
+    }
+
+    private fun getSourcePreferences(sourceId: Long): SourcePreferences {
+        return (sourceManager.get(sourceId) as ConfigurableSource).sourcePreferences()
+    }
+
+    private fun getApiCredentials(preferences: SourcePreferences): Pair<String, String> {
+        val apiUrl = preferences.getString("APIURL", "")
+        val apiKey = preferences.getString("APIKEY", "")
+        return apiUrl to apiKey
+    }
+
+    private fun fetchToken(apiUrl: String, apiKey: String): String? {
+        return api.getNewToken(apiUrl = apiUrl, apiKey = apiKey)
     }
 }
